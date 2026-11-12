@@ -20,7 +20,7 @@ API_KEY = os.getenv("GOOGLE_API_KEY")
 if API_KEY:
     genai.configure(api_key=API_KEY)
 else:
-    st.error("🚨 Error crítico: No se encontró GOOGLE_API_KEY en el archivo .env")
+    st.error("🚨 Error crítico: No se encontró GOOGLE_API_KEY en Secrets / .env")
     st.stop()
 
 MODELO_ROBUSTO = "gemini-2.5-flash"
@@ -46,17 +46,20 @@ PROMPT_SKILL_3 = cargar_prompt("prompts/skill_3_ingeniero.md")
 def extraer_texto_url(url):
     try:
         headers = {
-            "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36"
+            "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+            "Accept-Language": "es-MX,es;q=0.9"
         }
-        respuesta = requests.get(url, headers=headers, timeout=20)
+        respuesta = requests.get(url, headers=headers, timeout=15)
         respuesta.raise_for_status()
         soup = BeautifulSoup(respuesta.text, 'html.parser')
 
-        # Eliminar ruido estructural (menús, scripts, estilos, pies de página)
         for etiqueta in soup(["script", "style", "nav", "footer", "header", "noscript"]):
             etiqueta.decompose()
 
         return soup.get_text(separator='\n', strip=True)
+    except requests.exceptions.ConnectTimeout:
+        st.error("🔒 El servidor municipal bloqueó la conexión desde la nube (Firewall geográfico). Usa la opción **'Pegar texto de la ficha'** arriba para procesarlo al instante.")
+        return None
     except Exception as e:
         st.error(f"Error al leer la URL: {e}")
         return None
@@ -87,7 +90,6 @@ def consultar_gemini(system_instruction, texto_usuario):
 # UTILIDADES DE EXTRACCIÓN Y FORMATEO PARA WORD (.docx)
 # ---------------------------------------------------------
 def extraer_nombre_tramite(texto_fase_1):
-    """Extrae el nombre oficial del trámite desde la salida de la Fase 1."""
     patrones = [
         r'\*\*Nombre Oficial del Trámite:\*\*\s*(.+)',
         r'\*\*Nombre:\*\*\s*(.+)',
@@ -102,7 +104,6 @@ def extraer_nombre_tramite(texto_fase_1):
     return "Trámite Municipal"
 
 def agregar_texto_formateado(paragraph, texto):
-    """Convierte **negritas** y `código inline` a formato nativo de Word."""
     tokens = re.split(r'(\*\*.*?\*\*|`.*?`)', texto)
     for token in tokens:
         if not token:
@@ -118,11 +119,9 @@ def agregar_texto_formateado(paragraph, texto):
             paragraph.add_run(token)
 
 def renderizar_tabla_markdown(doc, lineas_tabla):
-    """Convierte bloques de tabla Markdown (| a | b |) en tablas reales de Word."""
     filas_limpias = []
     for linea in lineas_tabla:
         celdas = [c.strip() for c in linea.strip().strip('|').split('|')]
-        # Ignorar fila separadora tipo | :--- | :---: | --- |
         if all(re.match(r'^:?-+:?$', c) for c in celdas if c):
             continue
         if any(celdas):
@@ -151,10 +150,9 @@ def renderizar_tabla_markdown(doc, lineas_tabla):
                 for r in p.runs:
                     r.font.size = Pt(9)
 
-    doc.add_paragraph()  # Espacio posterior a la tabla
+    doc.add_paragraph()
 
 def insertar_bloque_uml(doc, codigo_uml):
-    """Inserta el código PlantUML limpio y aislado para evitar fugas de estilo."""
     p = doc.add_paragraph()
     p.paragraph_format.left_indent = Pt(12)
     p.paragraph_format.space_before = Pt(6)
@@ -167,7 +165,6 @@ def insertar_bloque_uml(doc, codigo_uml):
 def crear_documento_word(texto, nombre_tramite):
     doc = Document()
 
-    # Configurar fuente base del documento
     estilo_normal = doc.styles['Normal']
     estilo_normal.font.name = 'Calibri'
     estilo_normal.font.size = Pt(11)
@@ -213,7 +210,6 @@ def crear_documento_word(texto, nombre_tramite):
     for linea_raw in lineas:
         linea = linea_raw.strip()
 
-        # Detección de cierre o apertura de bloque PlantUML
         if linea.startswith("```"):
             vaciar_tabla()
             if en_bloque_uml:
@@ -222,7 +218,6 @@ def crear_documento_word(texto, nombre_tramite):
                 en_bloque_uml = False
                 recien_cerro_uml = True
             elif recien_cerro_uml:
-                # Ignorar backtick de cierre sobrante tras @enduml
                 recien_cerro_uml = False
             else:
                 en_bloque_uml = True
@@ -247,7 +242,6 @@ def crear_documento_word(texto, nombre_tramite):
 
         recien_cerro_uml = False
 
-        # Acumular líneas de tabla Markdown
         if linea.startswith('|') and '|' in linea[1:]:
             buffer_tabla.append(linea)
             continue
@@ -257,23 +251,19 @@ def crear_documento_word(texto, nombre_tramite):
         if not linea:
             continue
 
-        # Encabezados
         if linea.startswith('### '):
             doc.add_heading(linea.replace('### ', '').strip(), level=1)
         elif linea.startswith('#### '):
             doc.add_heading(linea.replace('#### ', '').strip(), level=2)
-        # Viñetas (incluye subviñetas con sangría)
         elif linea.startswith('* ') or linea.startswith('- '):
             es_subvineta = linea_raw.startswith('  ') or linea_raw.startswith('\t')
             estilo_lista = 'List Bullet 2' if es_subvineta else 'List Bullet'
             p = doc.add_paragraph(style=estilo_lista)
             agregar_texto_formateado(p, linea[2:].strip())
-        # Listas numeradas
         elif re.match(r'^\d+\.\s+', linea):
             texto_sin_num = re.sub(r'^\d+\.\s+', '', linea)
             p = doc.add_paragraph(style='List Number')
             agregar_texto_formateado(p, texto_sin_num)
-        # Párrafos estándar
         else:
             p = doc.add_paragraph()
             agregar_texto_formateado(p, linea)
@@ -295,65 +285,81 @@ st.set_page_config(page_title="Fábrica de Rediseño | Irapuato", page_icon="⚙
 st.title("⚙️ Orquestador Multi-Agente")
 st.subheader("Rediseño y Digitalización de Trámites (Municipio de Irapuato)")
 
-url_input = st.text_input(
-    "Pega la URL de la Ficha Informativa oficial del trámite:",
-    placeholder="https://tramites.irapuato.gob.mx/..."
+modo = st.radio(
+    "Selecciona el método de ingreso:",
+    ("URL de la Ficha Informativa", "Pegar texto de la Ficha (Si el portal bloquea la nube)")
 )
 
+texto_crudo = None
+url_input = None
+
+if modo == "URL de la Ficha Informativa":
+    url_input = st.text_input(
+        "Pega la URL de la Ficha Informativa oficial del trámite:",
+        placeholder="[https://digital.irapuato.gob.mx/tramite_servicio/](https://digital.irapuato.gob.mx/tramite_servicio/)..."
+    )
+else:
+    texto_crudo = st.text_area(
+        "Abre la ficha en tu navegador, selecciona todo (Cmd+A / Ctrl+A), copia y pega aquí:",
+        height=220,
+        placeholder="Pega aquí el contenido completo de la ficha informativa..."
+    )
+
 if st.button("Ejecutar Arquitectura Multi-Agente", type="primary"):
-    if not url_input or not url_input.startswith("http"):
-        st.warning("⚠️ Por favor, ingresa una URL válida que inicie con http:// o https://")
-    else:
-        with st.spinner("Extrayendo información del portal oficial..."):
+    if modo == "URL de la Ficha Informativa":
+        if not url_input or not url_input.startswith("http"):
+            st.warning("⚠️ Por favor, ingresa una URL válida que inicie con http:// o https://")
+            st.stop()
+        with st.spinner("Conectando con el portal oficial..."):
             texto_crudo = extraer_texto_url(url_input)
 
-        if not texto_crudo or len(texto_crudo.strip()) < 100:
-            st.error("⚠️ No se pudo extraer contenido suficiente de la URL. Verifica que el enlace sea público y accesible.")
-        else:
-            with st.expander("👀 Ver texto extraído de la URL (Debug)"):
-                st.text(texto_crudo)
+    if not texto_crudo or len(texto_crudo.strip()) < 100:
+        st.warning("⚠️ No hay contenido suficiente para procesar. Verifica la información ingresada.")
+    else:
+        with st.expander("👀 Ver texto capturado (Debug)"):
+            st.text(texto_crudo)
 
-            progreso = st.progress(0)
+        progreso = st.progress(0)
 
-            with st.status("Procesando trámite en 3 fases...", expanded=True) as status:
-                st.write("🕵️‍♂️ **Fase 1:** Analizando escenario base (Auditor As-Is)...")
-                input_fase_1 = f"TEXTO DEL TRÁMITE A EVALUAR:\n{texto_crudo}"
-                res_fase_1 = consultar_gemini(PROMPT_SKILL_1, input_fase_1)
-                progreso.progress(33)
+        with st.status("Procesando trámite en 3 fases...", expanded=True) as status:
+            st.write("🕵️‍♂️ **Fase 1:** Analizando escenario base (Auditor As-Is)...")
+            input_fase_1 = f"TEXTO DEL TRÁMITE A EVALUAR:\n{texto_crudo}"
+            res_fase_1 = consultar_gemini(PROMPT_SKILL_1, input_fase_1)
+            progreso.progress(33)
+            time.sleep(1)
+
+            if res_fase_1 and "### 1" in res_fase_1:
+                nombre_tramite = extraer_nombre_tramite(res_fase_1)
+
+                st.write("🏗️ **Fase 2:** Diseñando ecosistema To-Be (Arquitecto)...")
+                input_fase_2 = f"TEXTO ORIGINAL:\n{texto_crudo}\n\n--- DIAGNÓSTICO FASE 1 ---\n{res_fase_1}"
+                res_fase_2 = consultar_gemini(PROMPT_SKILL_2, input_fase_2)
+                progreso.progress(66)
                 time.sleep(1)
 
-                if res_fase_1 and "### 1" in res_fase_1:
-                    nombre_tramite = extraer_nombre_tramite(res_fase_1)
+                if res_fase_2 and "### 3" in res_fase_2:
+                    st.write("💻 **Fase 3:** Parametrizando tecnología (Ingeniero Tech)...")
+                    input_fase_3 = f"TEXTO ORIGINAL:\n{texto_crudo}\n\n--- FASE 1 ---\n{res_fase_1}\n\n--- FASE 2 ---\n{res_fase_2}"
+                    res_fase_3 = consultar_gemini(PROMPT_SKILL_3, input_fase_3)
+                    progreso.progress(100)
 
-                    st.write("🏗️ **Fase 2:** Diseñando ecosistema To-Be (Arquitecto)...")
-                    input_fase_2 = f"TEXTO ORIGINAL:\n{texto_crudo}\n\n--- DIAGNÓSTICO FASE 1 ---\n{res_fase_1}"
-                    res_fase_2 = consultar_gemini(PROMPT_SKILL_2, input_fase_2)
-                    progreso.progress(66)
-                    time.sleep(1)
+                    if res_fase_3:
+                        status.update(label="¡Procesamiento exitoso!", state="complete", expanded=False)
 
-                    if res_fase_2 and "### 3" in res_fase_2:
-                        st.write("💻 **Fase 3:** Parametrizando tecnología (Ingeniero Tech)...")
-                        input_fase_3 = f"TEXTO ORIGINAL:\n{texto_crudo}\n\n--- FASE 1 ---\n{res_fase_1}\n\n--- FASE 2 ---\n{res_fase_2}"
-                        res_fase_3 = consultar_gemini(PROMPT_SKILL_3, input_fase_3)
-                        progreso.progress(100)
+                        documento_final = f"{res_fase_1}\n\n{res_fase_2}\n\n{res_fase_3}"
+                        archivo_word = crear_documento_word(documento_final, nombre_tramite)
+                        nombre_archivo = re.sub(r'[^\w\s-]', '', nombre_tramite).strip().replace(' ', '_')
 
-                        if res_fase_3:
-                            status.update(label="¡Procesamiento exitoso!", state="complete", expanded=False)
-
-                            documento_final = f"{res_fase_1}\n\n{res_fase_2}\n\n{res_fase_3}"
-                            archivo_word = crear_documento_word(documento_final, nombre_tramite)
-                            nombre_archivo = re.sub(r'[^\w\s-]', '', nombre_tramite).strip().replace(' ', '_')
-
-                            st.success(f"✅ Ficha Técnica generada para: **{nombre_tramite}**")
-                            st.download_button(
-                                label="📥 Descargar Ficha Técnica (.docx)",
-                                data=archivo_word,
-                                file_name=f"Ficha_Tecnica_{nombre_archivo}.docx",
-                                mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document"
-                            )
-                        else:
-                            status.update(label="Fallo en Fase 3", state="error")
+                        st.success(f"✅ Ficha Técnica generada para: **{nombre_tramite}**")
+                        st.download_button(
+                            label="📥 Descargar Ficha Técnica (.docx)",
+                            data=archivo_word,
+                            file_name=f"Ficha_Tecnica_{nombre_archivo}.docx",
+                            mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+                        )
                     else:
-                        status.update(label="Fallo en Fase 2", state="error")
+                        status.update(label="Fallo en Fase 3", state="error")
                 else:
-                    status.update(label="Fallo en Fase 1 (El modelo no generó la estructura esperada)", state="error")
+                    status.update(label="Fallo en Fase 2", state="error")
+            else:
+                status.update(label="Fallo en Fase 1 (El modelo no generó la estructura esperada)", state="error")
